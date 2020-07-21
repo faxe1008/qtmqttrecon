@@ -7,11 +7,17 @@
 #include <QFileInfo>
 #include <QDebug>
 #include <QObject>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 static QMqttClient* mqtt_client;
 static QSslSocket* ssl_socket;
 static bool ping_response_received = false;
 static QString url = "";
+
+static QFileInfo ca_cert;
+static QFileInfo device_cert;
+static QFileInfo private_key;
 
 void onSSLEncrypted(){
     qDebug() << "SSL Socket encryption started!";
@@ -27,12 +33,11 @@ void onCheckPingResponse(){
     {
         qDebug() << "Mqtt client ping timed out";
 
-        if(ssl_socket->state() != QAbstractSocket::ConnectedState && ssl_socket->state() != QAbstractSocket::ConnectingState)
+        if(ssl_socket && ssl_socket->state() != QAbstractSocket::ConnectedState && ssl_socket->state() != QAbstractSocket::ConnectingState)
         {
-            qDebug() << "Socket is disconnect, trying to reconnect ...";
-            ssl_socket->disconnectFromHost();
-            ssl_socket->abort();
-            ssl_socket->close();
+            qDebug() << "Socket is disconnect, trying to reconnect ... " << url;
+            ssl_socket->flush();
+
             ssl_socket->connectToHostEncrypted(url, 8333);
             if(!ssl_socket->waitForEncrypted(3000)){
                 qDebug() << "ERROR SSL SOCKET!! " << QString::number(ssl_socket->error());
@@ -61,9 +66,9 @@ int main(int argc, char *argv[])
     mqtt_client = new QMqttClient(&a);
     ssl_socket = new QSslSocket(&a);
 
-    QFileInfo ca_cert(args.at(0));
-    QFileInfo device_cert(args.at(1));
-    QFileInfo private_key(args.at(2));
+     ca_cert = QFileInfo(args.at(0));
+     device_cert= QFileInfo(args.at(1));
+     private_key= QFileInfo(args.at(2));
 
     ssl_socket->setLocalCertificate(device_cert.filePath(), QSsl::EncodingFormat::Pem);
     ssl_socket->addCaCertificates(ca_cert.filePath(), QSsl::Pem,  QRegExp::FixedString);
@@ -74,9 +79,18 @@ int main(int argc, char *argv[])
 
     QObject::connect(ssl_socket, &QSslSocket::connected, [=](){
         qDebug() << "SSL Socket connected!";
-        //ssl_socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
-    });
+        ssl_socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
 
+        /*int fd = (int) ssl_socket->socketDescriptor();
+        int maxIdle = 10;
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &maxIdle, sizeof(maxIdle));
+
+        int count = 3;  // send up to 3 keepalive packets out, then disconnect if no response
+        setsockopt(fd, SOL_TCP, TCP_KEEPCNT, &count, sizeof(count));
+
+        int interval = 2;   // send a keepalive packet out every 2 seconds (after the 5 second idle period)
+        setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));*/
+    });
     QObject::connect(ssl_socket, &QSslSocket::disconnected, [=](){
         qDebug() << "SSL Socket disconnected!";
     });
@@ -109,6 +123,35 @@ int main(int argc, char *argv[])
     QObject::connect(mqtt_client, &QMqttClient::pingResponseReceived, [=](){
         ping_response_received = true;
         qDebug() << "################################### ping response received";
+    });
+
+    QObject::connect(ssl_socket, &QSslSocket::stateChanged, [=](QAbstractSocket::SocketState state){
+        qDebug() << "Socket state changed " << QString::number(state);
+    });
+
+    QObject::connect(ssl_socket, static_cast<void (QSslSocket::*)(QAbstractSocket::SocketError)>(&QSslSocket::error), [=](QAbstractSocket::SocketError error){
+        qDebug() << "Socket error changed " << QString::number(error);
+        ssl_socket->resume();
+    });
+
+    QObject::connect(ssl_socket, &QSslSocket::hostFound, [=](){
+        qDebug() << "Socket host found ";
+    });
+
+
+    QObject::connect(ssl_socket, &QSslSocket::peerVerifyError, [=](QSslError error){
+          qDebug() << "Socket peer verify error " << error.errorString();
+    });
+
+    QObject::connect(ssl_socket,  QOverload<const QList<QSslError> &>::of(&QSslSocket::sslErrors), [=](QList<QSslError> errors){
+        for(QSslError err : errors){
+            qDebug() << "Socket QSslError " << err.errorString();
+        }
+    });
+
+
+    QObject::connect(ssl_socket, &QSslSocket::modeChanged, [=](QSslSocket::SslMode newMode){
+        qDebug() << "Socket mode changed " << QString::number(newMode);
     });
 
     QTimer* keepalive_timer = new QTimer(&a);
